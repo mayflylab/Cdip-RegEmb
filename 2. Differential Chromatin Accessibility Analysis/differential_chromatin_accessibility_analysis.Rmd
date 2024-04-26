@@ -1,0 +1,634 @@
+---
+title: "Differential Chromatin Accessibility Analysis in C. dipterum Development"
+subtitle: "Gene regulatory dynamics during embryogenesis in Cloeon dipterum"
+author: "Maria Rossello"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_knit setup, include=FALSE, warning=FALSE}
+# Get your working directory (where you have your data):
+wd <- "/home/mariarossello/atac_paper_analysis/"
+setwd(file.path(wd))
+
+knitr::opts_knit$set(
+  root.dir = normalizePath(wd))
+```
+
+# Setting up project folders and libraries
+
+This section outlines the initial setup. It involves loading specific R functions, setting up necessary libraries, and organizing data directories to streamline file management and data processing.
+
+*Loading necessary functions.* This code chunk is responsible for importing custom R functions necessary for processing and analyzing ATAC-seq data. These functions are stored externally and are essential for the specific analyses that will be conducted in subsequent steps. 
+
+```{r message=FALSE, warning=FALSE}
+# Load functions from a script located in the working directory for downstream analysis
+source(paste0(wd,"/atac_downstrem_analysis_functions.R"))
+```
+
+*Loading required libraries.* A suite of R packages is loaded here, enabling data manipulation, visualization, and advanced statistical analysis
+
+```{r message=FALSE, warning=FALSE}
+# Load general purpose libraries necessary for data manipulation, visualization, and string operations
+library(tidyverse)  # Comprehensive collection of data manipulation and visualization tools
+library(stringr)    # Simplifies string operations
+library(readr)      # Efficiently reads and writes tabular data
+library(ggplot2)    # Creates elegant data visualisations using the grammar of graphics
+library(scales)     # For scaling functions for visualization
+library(tibble)     # Provides a modern rethinking of data frames
+
+# Load specific libraries for genomics data analysis
+library(edgeR)      # For differential expression analysis
+library(ggrepel)    # Helps with non-overlapping text labels on plots
+library(dendextend) # For enhancing dendrogram objects
+library(EnhancedVolcano) # For creating enhanced volcano plots
+library(topGO) #To perform GO enrichment analyisis
+```
+
+The input data directories are systematically organized to ensure easy access and management of data files necessary for the analysis:
+
+- 0_EXPERIMENT_INFO: Contains metadata about the experiments, such as sample details, experimental conditions...
+- 1_COUNTS: Stores count matrices.
+- 2_PEAK_INFO: Includes information about genomic regions of open chromatin identified in the ATAC-seq data.
+- 3_OTHER_SP_DATA: Holds comparative ATACseq data from other species that will be used for cross-species analysis. This data comes from publicly available data.
+- 4_NATCOM2020_INFO: Specific mayfly genomic information coming from [Almudi _et al.,_ 2020](https://doi.org/10.1038/s41467-020-16284-8).
+- 5_RNA-SEQ: Directory for storing RNA-seq data files.
+
+We save the paths to this folders in variables to acces them during all the analysis
+
+```{r folder with input data}
+info  <- paste0(wd,"0_EXPERIMENT_INFO/")
+counts  <- paste0(wd,"1_COUNTS/")
+peak_info <- paste0(wd,"2_PEAK_INFO/")
+sp_data <- paste0(wd,"3_OTHER_SP_DATA/")
+natcom2020 <- paste0(wd,"4_NATCOM2020_INFO/")
+rnaseq <- paste0(wd,"5_RNA-SEQ/")
+```
+
+The output data structure is geared towards organizing the results of the analysis into logical and functional directories, making it easier to locate and use the data in subsequent steps or for final reporting.
+
+- A2_DIFFERENTIAL_PEAK: This is the main folder designated for storing all outputs related to differential peak analysis. It acts as a central hub for aggregating analytical results. This will be designed as our analysis folder.
+- output_images: A subfolder created within the main analysis folder to store all graphical representations produced during the analysis. 
+- output_files: This directory is reserved for statistical outputs, such as tables.
+
+```{r folders to save results}
+analysis_folder <- paste0(wd,"A2_DIFF_CHROMATIN_ACCESSIBILITY/")
+imgdir  <- paste0(analysis_folder,"/output_images/")
+statdir <- paste0(analysis_folder,"/output_files/")
+```
+
+```{r opts_chunk setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	fig.path = imgdir,
+	fig.width = 10,
+	fig.height = 7
+)
+setwd(file.path(wd))
+```
+
+# Importing and organizing data
+
+## C. dipterum ATAC data
+
+To initiate our analysis of ATAC-seq data for C. dipterum, we first import the sample information. This data includes crucial details for each sample, which are essential for subsequent analyses:
+
+```{r warning=FALSE}
+samples_info <- data.frame(read_delim(paste0(info,"info_samples.csv"),
+                           delim = ",", 
+                           escape_double = FALSE, 
+                           trim_ws = TRUE))
+samples_info
+```
+
+As our focus is on dynamic peaks identified in a previous analysis (see Downstream analysis 1:Quantitative mapping of open chromatin regions), we proceed by loading normalized count data associated with these peaks:
+
+```{r}
+dynamic_norm_counts_df <- data.frame(read_delim(paste0(counts,"dynamic_peaks_sample_norm.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+```
+
+Next, we import detailed peak information that links genomic zones and genes, facilitating deeper biological insights:
+
+```{r}
+cdip_peak_zone_associated_gene <- data.frame(read_delim(paste0(peak_info,"/clodip_embryoATAC_peaks_and_genes.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+cdip_peak_zone_associated_gene <- cdip_peak_zone_associated_gene %>% dplyr::rename(peak_id = peak)
+rownames(cdip_peak_zone_associated_gene) <- cdip_peak_zone_associated_gene$peak_id
+head(cdip_peak_zone_associated_gene)
+```
+
+```{r}
+cdip_peak_unique_zone<- data.frame(read_delim(paste0(peak_info,"/clodip_embryoATAC_peaks_and_zones.tsv"),
+                                              delim = "\t", escape_double = FALSE,
+                                              trim_ws = TRUE))
+
+cdip_peak_unique_zone <- cdip_peak_unique_zone %>% dplyr::rename(peak_id = peak)
+rownames(cdip_peak_unique_zone) <- cdip_peak_unique_zone$peak_id
+head(cdip_peak_unique_zone)
+```
+
+Further, we load the gene associations for each peak, which are critical for functional genomic analysis:
+
+```{r}
+cdip_peak_associated_gene <- read_delim(paste0(peak_info,"/clodip_embryoATAC_peak_to_gene.tsv"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+head(cdip_peak_associated_gene)
+```
+
+## Gene Onthology Data
+
+For the analysis of C. dipterum, we incorporate a new gene annotation version (clodip_v3). To align this with other publicly available datasets that may use different annotations, we load a transcript equivalency table. This table, based on BLAST results, helps in correlating transcripts from the older gene models to the new annotation.
+
+```{r}
+cd_to_v3_transcripts <- read_table(paste0(natcom2020,"Cdip_ah2p_vs_clodip_v3_ids.txt"),
+                       col_names = FALSE)
+colnames(cd_to_v3_transcripts) <- c("Cdip_ah2p", "clodip_v3")
+```
+
+Lastly, we retrieve detailed gene equivalency data, which allows us to map genes from different versions effectively:
+
+```{r}
+cd_to_v3_genes <- read_delim(paste0(natcom2020,"Cdip_ah2p_vs_clodip_v3_ids_gene.txt"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+```
+This block reads a CSV file containing gene identifiers and their associated GO terms. Several columns are skipped because they are not required for the subsequent analysis, focusing only on the columns that map Cdip_ah2p gene identifiers to go_id. This data comes from Uniprot. 
+```{r }
+cd_go <- read_csv(paste0(natcom2020,"CD_uniprotF.csv"),
+                  col_types = cols(...1 = col_skip(), 
+                                   Entry = col_skip(),
+                                   Names = col_skip(), 
+                                   Protein.names = col_skip()))
+colnames(cd_go) <- c("Cdip_ah2p", "go_id")
+```
+
+This section of code merges the cd_go data with another dataset that contains mappings between Cdip_ah2p and the latest gene version identifiers (clodip_v3).
+
+```{r}
+v3_go <- inner_join(cd_to_v3_genes, cd_go, by = "Cdip_ah2p") %>%
+  dplyr::select(clodip_v3, go_id) %>%
+  group_by(clodip_v3) %>%
+  summarise(go_id = toString(gsub('"', '', go_id)), .groups = "drop")
+```
+
+Finally, the processed data, which now links the new gene identifiers with their corresponding GO terms, is written to a tab-separated text file. This file will be useful for downstream analyses.
+
+```{r}
+write.table(v3_go, 
+            paste0(natcom2020,"/genesv32GO.txt"), 
+            sep = "\t", row.names = F, quote = FALSE)
+```
+
+# Parameters setup
+
+This section establishes essential variables and aesthetic settings for the analysis. By carefully defining these parameters, we ensure that the analysis is not only rigorous but also that the resulting visualizations are coherent and informative.
+
+## Cut off thresholds
+
+First, we set the statistical thresholds, crucial for determining significance in our differential analysis:
+```{r}
+# Setting minimum filter threshold
+MIN_FILT = 10
+```
+
+Here, we define thresholds for fold change and p-values. A fold change threshold of 20 ensures that only the most substantially different expressions are considered, while a p-value below 0.05 is commonly accepted for statistical significance.
+
+```{r}
+# Defining Fold Change and p-value thresholds for significance in the analysis
+MIN_FC <- 2 # Fold Change threshold
+MIN_PV <- 0.05 # p-value threshold
+
+```
+
+## Conditions to Study
+
+Defining experimental conditions allows for targeted differential analysis across developmental stages. This block of code categorizes samples into developmental stages, which are crucial for comparing chromatin accessibility changes over time.
+
+```{r}
+# Creating a factor variable for the stages of development, which will be used in differential analysis
+condition_factors <- factor(samples_info$stage,
+                            levels=c("emb4","emb6","emb8","emb10", "emb12", "emb14"))
+
+# Assigning the factor to a new column in samples_info for easy reference
+samples_info$condition <- condition_factors
+
+```
+
+## Aesthetic Parameters
+
+Important: To ensure your analysis runs smoothly and your graphs look exactly as intended, it's crucial that the names you use in the following lists exactly match those defined in your data files. This consistency is key for linking your data correctly with the aesthetic elements like colors.
+
+Now, let's define some color parameters to keep our graphs looking consistent and visually appealing:
+
+```{r fig.width=3, fig.height=3}
+# Defining color schemes for the conditions, ensuring they match those in samples_info$condition
+condition_colors <- c("emb4"="#0072B2",  
+                      "emb6"="#009E73",  
+                      "emb8"="#D55E00",  
+                      "emb10"="#CC79A7", 
+                      "emb12"="#F0E442", 
+                      "emb14"="#56B4E9")
+
+# Setting colors for individual samples within each condition
+sample_colors <- c("e4_1"="#0072B2", 
+                   "e4_2"="#72C2FF",  
+                   "e6_1"="#009E73",
+                   "e6_2"="#72FFB4",  
+                   "e8_1"="#D55E00",
+                   "e8_2"="#FFA64D", 
+                   "e10_1"="#CC79A7",
+                   "e10_2"="#FFB3D9", 
+                   "e12_1"="#F0E442",
+                   "e12_2"="#FFFF99",
+                   "e14_1"="#56B4E9",
+                   "e14_2"="#99D6FF")
+
+# Color coding for different peak zones
+zone_colors <- c("promoter"="#DDC50F", 
+                 "proximal"="#228B22",  
+                 "genebody"="#4169E1",
+                 "distal"="#984EA3")
+
+# Additional color settings for states of the chromatin
+state_colors <- c("open"="#48A9A6",
+                  "closed"="#C97C5D",
+                  "no-sig"="grey")
+
+```
+
+We also specify the order in which samples and stages should be arranged for visual consistency across figures:
+
+```{r}
+# Ordering of samples for plots
+sample_order <- c("e4_1", 
+                  "e4_2", 
+                  "e6_1", 
+                  "e6_2", 
+                  "e8_1", 
+                  "e8_2", 
+                  "e10_1", 
+                  "e10_2", 
+                  "e12_1", 
+                  "e12_2", 
+                  "e14_1", 
+                  "e14_2")
+
+# Mapping of stages to descriptive names
+stage_order <- c("emb4"="Stage 4",
+                 "emb6"="Stage 6", 
+                 "emb8"="Stage 8", 
+                 "emb10"="Stage 10", 
+                 "emb12"="Stage 12", 
+                 "emb14"="Stage 14")
+```
+
+# Exploratory analysis of sample diversity
+
+This section of the analysis provides a visual exploration of the diversity among samples based on their normalized count data from dynamic peaks. The visualizations aim to capture variations in gene expression patterns and chromatin accessibility.
+
+## Principal Component Analysis (PCA)
+
+The PCA plot helps to visualize the overall variability among the samples. By reducing the dimensionality of the data, PCA can highlight patterns of similarity and divergence across samples, which may correlate with different developmental stages or experimental conditions.
+
+```{r}
+nom_counts_matrix <- as.matrix(filter_peakid(dynamic_norm_counts_df))
+```
+
+```{r pca}
+pcaData <- prcomp(nom_counts_matrix, scale=T)
+pcaData.df <- as.data.frame(pcaData$rotation)
+percentVar <- round(summary(pcaData)$importance[2,]*100,2)
+
+pcaData.df$sample <- as.factor(row.names(pcaData.df))
+
+pca.expr_raw <- ggplot(pcaData.df, aes(x=PC1,y=PC2, color=sample, label=sample)) +
+  geom_point(size=3) +
+  scale_color_manual(values=sample_colors) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  geom_label_repel(aes(label = sample),
+                   box.padding   = 0.35,
+                   point.padding = 0.5,
+                   segment.color = 'grey50') +
+  theme_light() +
+  theme(legend.position="none")
+print(pca.expr_raw)
+```
+
+```{r message=FALSE, warning=FALSE}
+save_ggplot(pca.expr_raw, "pca")
+```
+
+Here, PC1 and PC2 capture the primary sources of variation, representing significant axes of gene expression changes among samples. This visualization helps in identifying clusters of samples with similar expression profiles. We can see a clear difference between early and late stages.
+
+## Hierarchical clustering
+
+Hierarchical clustering provides another approach to examine relationships among samples. It uses correlation-based distance metrics to cluster samples, which can reveal groups based on chromatin accessibility patterns.
+The dendrogram visualizes the hierarchical relationships, with color coding to reflect the developmental stage of each sample. This analysis, simalry to the PCA,  helps identify which samples are more similar to each other, potentially indicating common regulatory mechanisms or stages of development. 
+
+```{r dendogram}
+dist <- as.dist(1-cor(nom_counts_matrix, method="spearman"))
+distclust <- hclust(dist)
+dendrogram <- as.dendrogram(distclust, hang=0.1)
+labels_colors(dendrogram) <- sample_colors[samples_info$condition][order.dendrogram(dendrogram)]
+dend_raw <- function(){plot(dendrogram,
+                 horiz = FALSE,
+                 yaxt='n', ann=FALSE)}
+dend_raw()
+```
+```{r message=FALSE, warning=FALSE}
+save_ggplot(dend_raw(), "dendogram")
+```
+# Differential chromatin accessibility analysis 
+
+This analysis section aims to identify significant changes in chromatin accessibility between developmental stages of C. dipterum, providing insights into the regulatory dynamics that may influence developmental processes.
+
+We begin by specifying a linear model to capture the relationships between conditions and gene expression levels, facilitating the identification of differential peaks across stages. This setup allows us to test specific hypotheses about changes between consecutive developmental stages.
+
+```{r}
+#define the matrix
+design_condition   <- model.matrix( ~0+ samples_info$condition)
+colnames(design_condition) <- unique(samples_info$condition)
+rownames(design_condition) <-samples_info$sample
+
+#define the contrasts and add to the matrix
+contrasts= c(paste("emb4","emb6", sep="-"),
+             paste("emb6","emb8", sep="-"),
+             paste("emb8","emb10", sep="-"),
+             paste("emb10","emb12", sep="-"),
+             paste("emb12","emb14", sep="-"))
+contrasts_matrix <- makeContrasts(contrasts=contrasts, levels=design_condition)
+
+attr(design_condition, "contrasts") <- list(condition = contrasts_matrix)
+```
+
+In the differential expression analysis for C. dipterum, we perform several key statistical steps to identify changes in chromatin accessibility. These steps refine our model to yield reliable insights into regulatory changes across developmental stages.
+
+```{r}
+# Fit the linear model
+fit <- lmFit(nom_counts_matrix,
+             design_condition)
+
+# Apply the contrasts to the fitted model
+fitt <- contrasts.fit(fit, contrasts_matrix)
+
+# Compute eBayes statistics
+fitt <- eBayes(fitt, trend=TRUE)
+```
+
+We prepare a detailed table of results to further explore and quantify the changes observed:
+
+```{r}
+make_top_table <- function(fit_model, contrast, MIN_PV=0.05, MIN_FC=1) {
+  # Obtain top results from topTable
+  top.res.t <- topTable(fit_model, coef=contrast,
+                        adjust.method="none", sort.by="B",
+                        number=Inf)
+
+  # Directional decisions based on P.Value and logFC
+  top.res.t$DIFF <- as.factor(ifelse(top.res.t$P.Value <= MIN_PV,
+                                     ifelse(top.res.t$logFC >= MIN_FC, "open",
+                                            ifelse(top.res.t$logFC <= -MIN_FC, "closed", "no-sig")),
+                                     "no-sig"))
+  
+  top.res.s <- top.res.t
+  top.res.s$peak_id <- rownames(top.res.t
+                                )
+  # Save results to a file
+  file_path <- paste0(statdir, "diff_chromatin_", contrast, ".txt")
+  write.table(top.res.s, 
+              file = file_path, 
+              sep = "\t", 
+              quote = FALSE,
+              col.names = TRUE, row.names = F)
+  return(top.res.t)
+}
+
+top_table_list <- lapply(contrasts, 
+                         function(x) make_top_table(fitt, x))
+names(top_table_list) <- contrasts
+```
+
+
+
+The following visualization displays the number of peaks that have become more accessible (opened) or less accessible (closed) between stages, offering a snapshot of dynamic chromatin changes.
+
+```{r}
+de_df <- data.frame(t(sapply(1:length(top_table_list),
+                           function(i){table(top_table_list[[i]]$DIFF)})),
+                    stg_trans=contrasts) %>%
+  pivot_longer(cols = -stg_trans, names_to = "exp", values_to = "n")
+
+filtered_df <- de_df[de_df$exp != "no.sig", ]
+filtered_df$stg_trans <- factor(filtered_df$stg_trans, levels = contrasts)
+```
+
+```{r num_diff_peaks}
+n_diff_plot <- ggplot(filtered_df, aes(x = stg_trans, y = n, color = exp, group = exp, label = n)) +
+  geom_line() +
+  # geom_point() +
+  geom_label_repel(aes(fill = exp), color = "black", size = 3, show.legend = FALSE, segment.size = 0.2) +
+  labs(title = "Line Plot of n vs stg_trans",
+       x = "Stage transition",
+       y = "Number of differentially regulated peaks",
+       color = "Chromatin state") +
+  scale_color_manual(values = state_colors) +
+  scale_fill_manual(values = state_colors) +  # Add fill scale for geom_label_repel
+  theme_classic()
+print(n_diff_plot)
+```
+```{r message=FALSE, warning=FALSE}
+save_ggplot(n_diff_plot, "num_diff_peaks")
+```
+
+Volcano plots enhance our understanding by visually distinguishing between significantly upregulated (opened) and downregulated (closed) peaks, integrating the impact of changes in expression magnitude and statistical significance.
+
+```{r}
+my_volcanoplot <- function(top.res.table, labels_column, contrast_name) {
+  #define some values for the caption
+  UPDN <- c(nrow(top.res.table[ top.res.table$DIFF == "open", ]),
+            nrow(top.res.table[ top.res.table$DIFF == "closed", ]))
+  
+  #define color
+  colorkey <- state_colors[match(levels(top.res.table[["DIFF"]]), names(state_colors))][top.res.table[["DIFF"]]]
+  
+  EnhancedVolcano(data.frame(top.res.table), x = 'logFC', y = 'P.Value',
+                  lab = labels_column,
+                  xlab = bquote(~Log[2]~ 'fold change'),
+                  ylab = bquote(~-Log[10]~ 'Pvalue'),
+                  xlim = c(min(top.res.table$logFC, na.rm = TRUE) - 0.5, max(top.res.table$logFC, na.rm = TRUE) + 0.5),
+                  ylim = c(0, max(-log10(top.res.table$P.Value), na.rm = TRUE) + 0.5),
+                  pCutoff = MIN_PV, FCcutoff = log2(MIN_FC), pointSize = 1.0, labSize = 2.0,
+                  title = "Volcano Plot",
+                  subtitle = contrast_name,
+                  caption = paste0('log2 FC cutoff: ', MIN_FC, '; p-value cutoff: ',
+                                   MIN_PV, '\nTotal = ', nrow(top.res.table),
+                                   ' peaks  [ ',UPDN[2],' close ,',UPDN[1],' open ]'),
+                  legendPosition = 'bottom', legendLabSize = 14, legendIconSize = 5.0,
+                  colCustom = colorkey,
+                  drawConnectors = TRUE,
+                  widthConnectors = 0.25,
+                  max.overlaps=5,
+                  colConnectors = 'grey30')
+  }
+```
+
+```{r volcano_plot, warning=FALSE}
+volcano_plot_list <- lapply(1:length(top_table_list),
+       function(i) {
+         my_volcanoplot(top.res.table=top_table_list[[i]],
+                        labels_column=rownames(top_table_list[[i]]),
+                        contrast_name=names(top_table_list)[[i]])
+       })
+
+print(volcano_plot_list)
+```
+
+```{r message=FALSE, warning=FALSE}
+lapply(1:length(volcano_plot_list),
+       function(i) {
+         contrast = contrasts[[i]]
+         save_ggplot(volcano_plot_list[[i]], 
+                     paste0("volcano_plot_", contrast))
+         })
+```
+
+# Gene Ontology (GO) enrichment analysis
+
+Prepare the genes to use as database (all cdip genes)
+```{r}
+geneID2GO <- readMappings(paste0(natcom2020,"/genesv32GO.txt"))
+geneID <- names(geneID2GO)
+```
+
+This function handles data extraction, gene retrieval, GO data preparation, enrichment testing using the elim algorithm, and saving of the results. It enables systematic and repeatable analysis across various data subsets and conditions.
+
+```{r}
+top10GO_fun <- function(contrast, state) {
+  # Extract peaks for the specified state from differential expression results
+  peaks <- rownames(top_table_list[[contrast]][top_table_list[[contrast]]$DIFF==state,])
+  
+  # Retrieve corresponding genes associated with those peaks
+  genes_peaks <- cdip_peak_associated_gene %>% 
+            filter(peak_id %in% peaks) %>%
+            dplyr::select(clodip_v3) %>%
+            filter(!is.na(clodip_v3)) %>%
+            pull(clodip_v3)
+  
+  # Prepare gene list for GO analysis
+  geneList <- factor(as.integer(geneID %in% genes_peaks))
+  names(geneList) <- geneID
+  
+  # Set up topGO data object for Biological Process ontology
+  GOdata <- new("topGOdata", 
+                ontology = "BP", 
+                allGenes = geneList,
+                annot = annFUN.gene2GO, 
+                gene2GO = geneID2GO)
+  
+  # Perform enrichment test using the 'elim' algorithm
+  resultTopGO.elim <- runTest(GOdata, 
+                              algorithm = "elim", 
+                              statistic = "Fisher")
+  
+  # Extract top results and order them
+  topResults <- GenTable(GOdata, 
+                         elimKS = resultTopGO.elim,
+                         orderBy = "elimKS", 
+                         topNodes = 10)
+  
+  # Save results to a file
+  file_path <- paste0(statdir, "BP_top10GO_", contrast, "_" ,state, ".txt")
+  write.table(topResults, 
+              file = file_path, 
+              sep = "\t", 
+              quote = FALSE,
+              col.names = TRUE, row.names = FALSE)
+  
+  return(topResults)
+}
+```
+
+The code below applies the previously defined top10GO_fun function to conduct enrichment analysis for both 'open' and 'closed' chromatin states across all contrasts in the dataset. Results are systematically named and stored, facilitating easy access for subsequent analysis.
+
+```{r}
+# Perform GO enrichment analysis for 'open' state across all contrasts
+open_results <- lapply(contrasts, function(c) top10GO_fun(contrast = c, state = "open"))
+names(open_results) <- contrasts
+
+# Perform the same for 'closed' state
+close_results <- lapply(contrasts, function(c) top10GO_fun(contrast = c, state = "closed"))
+names(close_results) <- contrasts
+```
+
+This function, plot_GO, is designed to generate plots that visually represent the GO enrichment results. It adjusts data for plotting, uses ggplot2 to create visually appealing graphs, and saves each plot systematically.
+
+```{r}
+plot_GO <-function(topGO_res, contrast, state) {
+  
+  # Adjust numeric values for plotting
+  advanced_as.numeric <- function(x) {
+    x <- gsub("<", "", x)
+    numeric_values <- as.numeric(x)
+    return(numeric_values)
+    }
+  
+  # Extract results for specific contrast and adjust p-values
+  topResults <- topGO_res[[contrast]]
+  topResults$elimKS <- advanced_as.numeric(topResults$elimKS)
+  topResults <- topResults[topResults$elimKS<0.05,]
+  topResults$Term <- factor(topResults$Term, levels=rev(topResults$Term))
+  
+  # Create a ggplot of the enrichment scores
+  go_plot <- ggplot(topResults,
+                aes(x = Term, y = -log10(elimKS), size = Significant, fill = -log10(elimKS))) +
+    geom_point(shape = 21) +
+    scale_fill_gradient(high = state_colors[state],
+                        low = "white") +
+    xlab('') + ylab('Enrichment score') +
+    labs(
+      title =  paste0('GO enrich. ', contrast, " " ,state, " chromatin"),
+    ) +
+    theme_classic() +
+    theme(legend.position = "none",
+          panel.grid.major=element_blank(), 
+          panel.border=element_blank(),
+          text = element_text(size = 20))+
+    coord_flip()
+  
+  # Save the plot
+  save_ggplot(go_plot, 
+              paste0("BP_top10GO_", contrast, "_" ,state))
+  
+  return(go_plot)
+}
+```
+
+```{r open_chromatin}
+# Generate and display GO enrichment plots for 'open' state
+lapply(contrasts, function(c) plot_GO(open_results, contrast = c, state = "open"))
+```
+
+```{r closed_chromatin}
+# Generate and display GO enrichment plots for 'closed' state
+lapply(contrasts, function(c) plot_GO(close_results, contrast = c, state = "closed"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
