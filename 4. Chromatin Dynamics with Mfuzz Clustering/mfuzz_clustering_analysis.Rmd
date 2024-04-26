@@ -1,0 +1,506 @@
+---
+title: "Chromatin Dynamics with Mfuzz Clustering"
+subtitle: "Gene regulatory dynamics during embryogenesis in Cloeon dipterum"
+author: "Joan Pallares & Maria Rossello"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_knit setup, include=FALSE, warning=FALSE}
+# Get your working directory (where you have your data):
+wd <- "/home/mariarossello/atac_paper_analysis/"
+setwd(file.path(wd))
+
+knitr::opts_knit$set(
+  root.dir = normalizePath(wd))
+```
+
+# Setting up project folders and libraries
+
+This section outlines the initial setup. It involves loading specific R functions, setting up necessary libraries, and organizing data directories to streamline file management and data processing.
+
+*Loading necessary functions.* This code chunk is responsible for importing custom R functions necessary for processing and analyzing ATAC-seq data. These functions are stored externally and are essential for the specific analyses that will be conducted in subsequent steps. 
+
+```{r message=FALSE, warning=FALSE}
+# Load functions from a script located in the working directory for downstream analysis
+source(paste0(wd,"/atac_downstrem_analysis_functions.R"))
+```
+
+*Loading required libraries.* A suite of R packages is loaded here, enabling data manipulation, visualization, and advanced statistical analysis
+
+```{r message=FALSE, warning=FALSE}
+# Data Import and Manipulation
+library(readr)   # Functions for reading delimited files
+library(dplyr)   # Data manipulation functions
+library(tidyr)   # Tools for data tidying
+library(stringr) # String manipulation functions
+
+# Visualization and Plotting
+library(ggplot2)       # Data visualization package
+library(RColorBrewer)  # Color palettes for plotting
+library(gridExtra)     # Arranging multiple plots
+
+# Clustering Analysis
+library(Mfuzz) # Functions for fuzzy clustering of time series data
+
+# Gene Ontology Analysis
+library(topGO) # Tools for Gene Ontology enrichment analysis
+```
+
+The input data directories are systematically organized to ensure easy access and management of data files necessary for the analysis:
+
+- 0_EXPERIMENT_INFO: Contains metadata about the experiments, such as sample details, experimental conditions...
+- 1_COUNTS: Stores count matrices.
+- 2_PEAK_INFO: Includes information about genomic regions of open chromatin identified in the ATAC-seq data.
+- 3_OTHER_SP_DATA: Holds comparative ATACseq data from other species that will be used for cross-species analysis. This data comes from publicly available data.
+- 4_NATCOM2020_INFO: Specific mayfly genomic information coming from [Almudi _et al.,_ 2020](https://doi.org/10.1038/s41467-020-16284-8).
+- 5_RNA-SEQ: Directory for storing RNA-seq data files.
+
+We save the paths to this folders in variables to acces them during all the analysis
+
+```{r folder with input data}
+info  <- paste0(wd,"0_EXPERIMENT_INFO/")
+counts  <- paste0(wd,"1_COUNTS/")
+peak_info <- paste0(wd,"2_PEAK_INFO/")
+sp_data <- paste0(wd,"3_OTHER_SP_DATA/")
+natcom2020 <- paste0(wd,"4_NATCOM2020_INFO/")
+rnaseq <- paste0(wd,"5_RNA-SEQ/")
+```
+
+The output data structure is geared towards organizing the results of the analysis into logical and functional directories, making it easier to locate and use the data in subsequent steps or for final reporting.
+
+- A4_MFUZZ: This is the main folder designated for storing all outputs related to differential peak analysis. It acts as a central hub for aggregating analytical results. This will be designed as our analysis folder.
+- output_images: A subfolder created within the main analysis folder to store all graphical representations produced during the analysis. 
+- output_files: This directory is reserved for statistical outputs, such as tables.
+
+```{r folders to save results}
+analysis_folder <- paste0(wd,"A4_MFUZZ/")
+imgdir  <- paste0(analysis_folder,"/output_images/")
+statdir <- paste0(analysis_folder,"/output_files/")
+```
+
+```{r opts_chunk setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	fig.path = imgdir,
+	fig.width = 10,
+	fig.height = 7
+)
+setwd(file.path(wd))
+```
+
+# Importing and Organizing Data
+
+## C. dipterum ATAC Data
+
+To initiate our analysis of ATAC-seq data for *C. dipterum*, we begin by importing the sample information. This dataset includes essential details for each sample, crucial for the subsequent analyses.
+
+```{r warning=FALSE}
+# Load the sample information from a CSV file
+samples_info <- readr::read_delim(paste0(info, "info_samples.csv"),
+                                  delim = ",", 
+                                  escape_double = FALSE, 
+                                  trim_ws = TRUE)
+# Display the dataframe to verify its contents
+samples_info
+```
+
+Given our focus on dynamic peaks identified in a previous analysis (see Downstream analysis 1: Quantitative Mapping of Open Chromatin Regions), we next load the normalized count data associated with these peaks:
+
+```{r}
+dynamic_norm_counts_df <- data.frame(read_delim(paste0(counts, "dynamic_peaks_stage.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+```
+
+We also import peak information associated with genes and unique zones for further analysis.
+
+```{r}
+cdip_peak_zone_associated_gene <- data.frame(read_delim(paste0(peak_info,"clodip_embryoATAC_peaks_and_genes.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+cdip_peak_zone_associated_gene <- cdip_peak_zone_associated_gene %>% dplyr::rename(peak_id = peak)
+rownames(cdip_peak_zone_associated_gene) <- cdip_peak_zone_associated_gene$peak_id
+head(cdip_peak_zone_associated_gene)
+```
+
+```{r}
+cdip_peak_unique_zone<- data.frame(read_delim(paste0(peak_info,"clodip_embryoATAC_peaks_and_zones.tsv"),
+                                              delim = "\t", escape_double = FALSE,
+                                              trim_ws = TRUE))
+
+cdip_peak_unique_zone <- cdip_peak_unique_zone %>% dplyr::rename(peak_id = peak)
+rownames(cdip_peak_unique_zone) <- cdip_peak_unique_zone$peak_id
+head(cdip_peak_unique_zone)
+```
+
+We load the gene associations for each peak, which are critical for functional genomic analysis:
+
+```{r}
+cdip_peak_associated_gene <- read_delim(paste0(peak_info,"/clodip_embryoATAC_peak_to_gene.tsv"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+```
+
+## Gene Onthology Data
+
+For the analysis of C. dipterum, we incorporate a new gene annotation version (clodip_v3). To align this with other publicly available datasets that may use different annotations, we load a transcript equivalency table. This table, based on BLAST results, helps in correlating transcripts from the older gene models to the new annotation.
+
+```{r}
+cd_to_v3_transcripts <- read_table(paste0(natcom2020,"Cdip_ah2p_vs_clodip_v3_ids.txt"),
+                       col_names = FALSE)
+colnames(cd_to_v3_transcripts) <- c("Cdip_ah2p", "clodip_v3")
+```
+
+Lastly, we retrieve detailed gene equivalency data, which allows us to map genes from different versions effectively:
+
+```{r}
+cd_to_v3_genes <- read_delim(paste0(natcom2020,"Cdip_ah2p_vs_clodip_v3_ids_gene.txt"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+```
+This block reads a CSV file containing gene identifiers and their associated GO terms. Several columns are skipped because they are not required for the subsequent analysis, focusing only on the columns that map Cdip_ah2p gene identifiers to go_id. This data comes from Uniprot. 
+```{r }
+cd_go <- read_csv(paste0(natcom2020,"CD_uniprotF.csv"),
+                  col_types = cols(...1 = col_skip(), 
+                                   Entry = col_skip(),
+                                   Names = col_skip(), 
+                                   Protein.names = col_skip()))
+colnames(cd_go) <- c("Cdip_ah2p", "go_id")
+```
+
+We load data which links the new gene identifiers with their corresponding GO terms
+
+```{r}
+v3_go <- read_delim(paste0(natcom2020,"/genesv32GO.txt"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+```
+
+# Aesthetic Parameters
+
+Important: To ensure your analysis runs smoothly and your graphs look exactly as intended, it's crucial that the names you use in the following lists exactly match those defined in your data files. This consistency is key for linking your data correctly with the aesthetic elements like colors.
+
+Now, let's define some color parameters to keep our graphs looking consistent and visually appealing:
+
+```{r colors}
+# Defining color schemes for the conditions, ensuring they match those in samples_info$condition
+condition_colors <- c("emb4"="#0072B2",  
+                      "emb6"="#009E73",  
+                      "emb8"="#D55E00",  
+                      "emb10"="#CC79A7", 
+                      "emb12"="#F0E442", 
+                      "emb14"="#56B4E9")
+
+# Color coding for different peak zones
+zone_colors <- c("promoter"="#DDC50F", 
+                 "proximal"="#228B22",  
+                 "genebody"="#4169E1",
+                 "distal"="#984EA3")
+
+```
+
+We also specify the order in which samples and stages should be arranged for visual consistency across figures:
+
+```{r order}
+# Mapping of stages to descriptive names
+stage_order <- c("emb4"="Stage 4",
+                 "emb6"="Stage 6", 
+                 "emb8"="Stage 8", 
+                 "emb10"="Stage 10", 
+                 "emb12"="Stage 12", 
+                 "emb14"="Stage 14")
+```
+
+# Mfuzz
+
+To effectively manage our data within the R environment, we convert our dataframe into a matrix format and encapsulate it within an ExpressionSet object. This object will facilitate further manipulation and analysis.
+
+```{r}
+# Setting the first column as row names and then removing it from the dataframe
+rownames(dynamic_norm_counts_df) <- dynamic_norm_counts_df[,1]
+dynamic_norm_counts_df[,1] <- NULL
+
+# Converting the dataframe to a matrix
+dynamic_peaks_mtx <- as.matrix(dynamic_norm_counts_df)
+
+# Creating an ExpressionSet object
+normalizedSet <- ExpressionSet(assayData=dynamic_peaks_mtx)
+```
+
+We proceed to clean the data by removing any instances with missing values and then apply normalization to standardize the expression levels of each peak. This step is crucial as it ensures that the clustering process is influenced primarily by patterns of variation in peak accessibility rather than differences in magnitude.
+
+```{r}
+# Filtering out rows with significant missing values
+embryo.r <- filter.NA(normalizedSet, thres=0.5)
+
+# Imputing missing values using k-nearest neighbors
+embryo.f <- fill.NA(embryo.r, mode="knnw")
+
+# Standardizing the data so each peak has zero mean and unit variance
+embryo.s <- standardise(embryo.f)
+```
+
+After thorough testing of various parameters, we choose the fuzziness parameter m = 1.5 and decide to identify 30 clusters. These parameters were optimized to capture the nuanced patterns of chromatin accessibility dynamics.
+
+```{r}
+# Setting the fuzziness parameter and the number of clusters
+m <- 1.5
+cluster <- 30
+```
+
+We apply the Mfuzz clustering algorithm to our standardized data. The output is visualized through a series of plots that depict the temporal patterns of each cluster, allowing us to observe the developmental progression of chromatin accessibility.
+
+```{r}
+# Performing Mfuzz clustering
+mf <- mfuzz(embryo.s, c=cluster, m=m)
+
+# Generating a plot to visualize the clustering results
+mfuzz_plot <- mfuzz.plot(embryo.s, cl=mf, time.labels=c("emb4", "emb6", "emb8", "emb10", "emb12", "emb14"), new.window=FALSE)
+```
+
+```{r warning=FALSE, include=FALSE}
+# save plot in pdf
+pdf(paste0(imgdir,"mfuzz.pdf"), height=12, width=20)
+    
+mfuzz.plot(embryo.s,cl=mf, mfrow=c(5,7),
+           time.labels=c("emb4","emb6","emb8","emb10","emb12","emb14"),new.window=FALSE)
+dev.off()
+```
+
+Key metrics and results from the Mfuzz clustering are documented and saved for further analysis. This includes the cluster centers, membership values, and the size of each cluster, providing insights into the predominant patterns of chromatin dynamics across the stages studied.
+
+```{r warning=FALSE, include=FALSE}
+# Saving cluster centers and membership values to files
+write.table(mf$centers, file=paste0(statdir,"center_mfuzz.txt"), sep="\t", quote=FALSE)
+mf_membership <- mf$membership
+new_column <- rownames(mf_membership)
+mf_membership <- cbind(new_column, mf_membership)
+write.table(mf_membership, file=paste0(statdir,"membership_mfuzz.txt"), sep="\t", quote=FALSE, row.names=FALSE)
+write.table(mf$size, file=paste0(statdir,"size_mfuzz.txt"), sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+Finally, we prepare a dataframe associating each peak with its corresponding cluster. This data will be crucial for subsequent analyses.
+
+```{r}
+# Creating a dataframe for peak-cluster associations
+mfuzz_clusters <- data.frame(peak=names(mf$cluster), clusters = as.numeric(mf$cluster))
+colnames(mfuzz_clusters) <- c("peak_id", "cluster")
+```
+
+```{r warning=FALSE, include=FALSE}
+# Saving the peak-cluster association data
+write.table(mfuzz_clusters, file=paste0(statdir,"cluster_mfuzz_peak_id.txt"), quote=FALSE, row.names=FALSE, sep="\t")
+```
+
+#Downstream Analysis: Chromatin Zone Distribution
+
+In the first step of this analysis, we combine the clustering results from the Mfuzz analysis with additional genomic context about each peak. By joining our mfuzz_clusters data with cdip_peak_associated_gene, we link each chromatin peak to its respective genomic zone and associated gene information. This enriched dataset facilitates a comprehensive examination of the spatial distribution of dynamic chromatin accessibility across different genomic regions.
+
+```{r}
+# Merging the clustering results with genomic zone data and selecting relevant columns
+peaks_in_mfuzz <- inner_join(mfuzz_clusters, cdip_peak_associated_gene, by = "peak_id") %>%
+  dplyr::select(peak_id, cluster, zone, clodip_v3) %>%
+  distinct(peak_id, cluster, zone, clodip_v3, .keep_all = TRUE)
+```
+
+Next, we visualize the distribution of dynamic peaks across various genomic zones—promoter, proximal, genebody, and distal—using a bar plot. This visualization helps highlight the predominant zones of chromatin dynamics and can guide further biological interpretation and hypothesis generation.
+
+```{r mfuzz_type_of_zone, fig.height=5, fig.width=6}
+peaks_in_mfuzz_zone_plot <- ggplot(peaks_in_mfuzz, 
+                                           aes(x = factor(zone, levels = c("promoter", "proximal", "genebody", "distal")),
+                                               fill = factor(zone, levels = c("promoter", "proximal", "genebody", "distal")))) +
+  geom_bar() +
+  theme_classic() +
+  scale_fill_manual(values = zone_colors) +
+  theme(legend.position = "none") +
+  labs(title = "Distribution of Zones within Each Module",
+       x = "Zone",
+       y = "Number of Peaks")
+print(peaks_in_mfuzz_zone_plot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+save_ggplot(peaks_in_mfuzz_zone_plot, "mfuzz_type_of_zone")
+```
+
+To further dissect the data, we plot the distribution of chromatin zones within each cluster identified by Mfuzz. This facetted bar plot allows for a detailed comparison across clusters, helping us identify specific patterns of chromatin accessibility that may correlate with different biological processes or states.
+
+```{r mfuzz_cluter_type_of_zone}
+mfuzz_cluter_zone_plot <- ggplot(peaks_in_mfuzz, 
+                                           aes(x = factor(zone, levels = c("promoter", "proximal", "genebody", "distal")),
+                                               fill = factor(zone, levels = c("promoter", "proximal", "genebody", "distal")))) +
+  geom_bar() +
+  facet_wrap(~cluster) +
+  theme_classic() +
+  scale_fill_manual(values = zone_colors) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x = element_blank(),
+        legend.title = element_blank()) +
+  labs(title = "Distribution of Zones within Each Module",
+       x = "Zone",
+       y = "Number of Peaks")
+print(mfuzz_cluter_zone_plot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+save_ggplot(mfuzz_cluter_zone_plot, "mfuzz_type_of_zone_by_cluster")
+```
+
+In this segment of the analysis, we focus on exporting the list of peak IDs categorized by their respective clusters. This operation facilitates further targeted investigations for each cluster, such as differential gene expression analysis or regulatory motif scanning, which might require specific peak IDs as input.
+
+```{r message=FALSE, warning=FALSE}
+invisible(
+  lapply(unique(peaks_in_mfuzz$cluster), 
+         function(x){
+           cluster_peaks <- peaks_in_mfuzz[(peaks_in_mfuzz$cluster == x),]$peak_id
+           file_path <- paste0(statdir, "/mfuzz_cluster", x, "_peaks.txt")
+           writeLines(cluster_peaks, con = file_path)
+           }
+  )
+)
+```
+
+# Downstream analysis: Motive enchiment using homer
+
+By analyzing the motif enrichment in different chromatin regions classified by WGCNA modules, we can uncover potentially distinct regulatory mechanisms acting in different functional genomic segments.
+
+This portion of the code iterates over text files in a specified directory, each representing a distinct WGCNA module with associated peak IDs. For each module:
+
+- A BED file is created containing only the peaks from the dynamic dataset that are listed in the module-specific text file.
+- A background (bg) BED file is also generated excluding the peaks listed in the module-specific file from the dynamic dataset. This helps in providing a contrast in the motif enrichment analysis.
+
+Disclaimer:
+This analysis must be run on a high-performance computing cluster or server due to its intensive computational demands, particularly due to the large scale of genomic data and the complexity of motif enrichment processes. 
+
+```{bash eval=FALSE}
+for file in $homer/mfuzz/*.txt; do
+    filename=$(basename "$file")  
+    filename_without_extension="${filename%.*}"  
+    cluster=$(echo "$filename_without_extension" | cut -d'_' -f2) 
+
+    grep -f $homer/mfuzz/"$filename" $bed/dynamic_peaks.bed > $bed/mfuzz/"$cluster"_peaks.bed
+    grep -v -f $homer/mfuzz/"$filename" $bed/dynamic_peaks.bed > $bed/mfuzz/bg_"$cluster"_peaks.bed
+done
+
+
+for file in $homer/mfuzz/*.txt; do
+    filename=$(basename "$file")  
+    filename_without_extension="${filename%.*}"  
+    cluster=$(echo "$filename_without_extension" | cut -d'_' -f2) 
+
+    mkdir $homer/mfuzz/"$cluster"
+
+    findMotifsGenome.pl \
+        $bed/mfuzz/"$cluster"_peaks.bed  \
+        /data/mayfly/clodip_v3/genome_CADEPI01_2023.fasta.soft_masked \
+        $homer/mfuzz/"$cluster" \
+        -preparsedDir $homer/clodip_v3_preparsed/ \
+        -bg $bed/mfuzz/bg_"$cluster"_peaks.bed \
+        -size given \
+        -mset insects \
+        -p 50 \
+        2> $homer/mfuzz/"$cluster"/findMotifsGenome.log
+done
+```
+
+# Downstream Analysis: Gene Ontology Enrichment
+
+For this downstream analysis, we start by setting up our gene ontology (GO) database, which is essential for determining the biological processes associated with genes in different chromatin accessibility clusters. We load mappings from gene IDs to GO terms from a specified file, which includes comprehensive gene annotations based on uniprot data.
+
+```{r}
+# Loading gene ID to GO term mappings from a provided file
+geneID2GO <- readMappings(paste0(natcom2020,"/genesv32GO.txt"))
+geneID <- names(geneID2GO)
+```
+
+We proceed by isolating the genes associated with each cluster identified in the Mfuzz analysis. These gene lists will be used to perform GO enrichment analysis to understand the biological implications of the observed chromatin dynamics within each cluster.
+
+```{r eval=FALSE, include=FALSE}
+# Extracting and saving peak-associated genes for each cluster
+lapply(unique(peaks_in_mfuzz$cluster), 
+       function(x){
+         cluster_peaks <- peaks_in_mfuzz[peaks_in_mfuzz$cluster == x,]$peak_id
+         file_path <- paste0(statdir, "/mfuzz_cluster", x, "_peaks.txt")
+         writeLines(cluster_peaks, con = file_path)
+       })
+```
+
+Next, we calculate the enrichment of GO terms in each cluster using the topGO package. This approach identifies significant biological processes (BP) that are overrepresented in each cluster, providing insights into the functional roles of the chromatin regions grouped together.
+
+```{r}
+# Initializing an empty list to store GO enrichment results for each cluster
+cluster_numbers <- sort(unique(peaks_in_mfuzz$cluster))
+allResults <- list()
+
+# Iterating over each cluster to perform GO enrichment analysis
+allResults <- lapply(cluster_numbers, function(x) {
+  cluster_df <- peaks_in_mfuzz[peaks_in_mfuzz$cluster == x, ]
+  cluster_genes <- cluster_df$clodip_v3
+  
+  geneList <- factor(as.integer(geneID %in% cluster_genes))
+  names(geneList) <- geneID
+  
+  # Setting up the topGO data object
+  GOdata <- new("topGOdata", ontology = "BP", allGenes = geneList,
+                annot = annFUN.gene2GO, gene2GO = geneID2GO)
+  
+  # Running the enrichment test using the 'elim' algorithm
+  resultTopGO.elim <- runTest(GOdata, algorithm = "elim", statistic = "Fisher")
+  topResults <- GenTable(GOdata, elimKS = resultTopGO.elim,
+                         orderBy = "elimKS", topNodes = 10)
+  
+  # Saving the top GO enrichment results for each cluster
+  file_path <- paste0(statdir, "/mfuzz_cluster", x, "_BP_topGO.txt")
+  write.table(topResults, file = file_path, sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+  
+  return(topResults)
+})
+names(allResults) <- cluster_numbers
+```
+
+Finally, we create visual representations of the GO enrichment results for each cluster. These visualizations highlight the most significantly enriched biological processes, providing an intuitive overview of the functional significance of each cluster.
+
+```{r}
+allPlots <- lapply(cluster_numbers, function(x) {
+  
+  topResults <- allResults[[x]]
+  
+  topResults$elimKS <- as.numeric(topResults$elimKS)
+  topResults <- topResults[topResults$elimKS<0.05,]
+  topResults$Term <- factor(topResults$Term, levels=rev(topResults$Term))
+  
+  go_plot <- ggplot(topResults,
+                aes(x = Term, y = -log10(elimKS), size = Significant, fill = -log10(elimKS))) +
+    geom_point(shape = 21) +
+    scale_fill_distiller(palette = "Reds", direction = 1) +
+    
+    xlab('') + ylab('Enrichment score') +
+    labs(
+      title =  paste0('GO enrichment cluster',x),
+    ) +
+    
+    theme_classic() +
+    theme(legend.position = "none",panel.grid.major=element_blank(), panel.border=element_blank())+
+    coord_flip()
+  
+  save_ggplot(go_plot, paste0("mfuzz_cluster",x,"_BP_GOplot"))
+  
+  return(go_plot)
+})
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
