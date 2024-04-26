@@ -19,7 +19,7 @@ Peaks are classified and linked to genes based on proximity to Transcription Sta
 This section encompasses various analyses related to chromatin accessibility during different embryonic stages of _C. dipterum_:
 
 1. **Genomic Peaks Analysis & Comparative Distribution**
-2. **Differential Chromatin Accessibility Analysis in C. dipterum Development**
+2. **Differential Chromatin Accessibility Analysis**
 3. **Chromatin Changes in Relation to WGCNA Modules**
 4. **Chromatin Dynamics with Mfuzz Clustering**
 5. **Chromatin Dynamics with Kmeans Clustering**
