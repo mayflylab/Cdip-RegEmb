@@ -1,0 +1,571 @@
+---
+title: "Integrative Analysis of RNA-seq and ATAC-seq Data"
+subtitle: "Gene regulatory dynamics during embryogenesis in Cloeon dipterum"
+author: "Maria Rossello"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_knit setup, include=FALSE, warning=FALSE}
+# Get your working directory (where you have your data):
+wd <- "/home/mariarossello/atac_paper_analysis/"
+setwd(file.path(wd))
+
+knitr::opts_knit$set(
+  root.dir = normalizePath(wd))
+```
+
+# Setting up project folders and libraries
+
+This section outlines the initial setup. It involves loading specific R functions, setting up necessary libraries, and organizing data directories to streamline file management and data processing.
+
+*Loading necessary functions.* This code chunk is responsible for importing custom R functions necessary for processing and analyzing ATAC-seq data. These functions are stored externally and are essential for the specific analyses that will be conducted in subsequent steps. 
+
+```{r message=FALSE, warning=FALSE}
+# Load functions from a script located in the working directory for downstream analysis
+source(paste0(wd,"/atac_downstrem_analysis_functions.R"))
+```
+
+*Loading required libraries.* A suite of R packages is loaded here, enabling data manipulation, visualization, and advanced statistical analysis
+
+```{r message=FALSE, warning=FALSE}
+# Load Libraries
+
+## Libraries for Data Manipulation
+library(dplyr)        # Provides a grammar for data manipulation, offering helpful verbs like mutate, select, filter.
+library(tidyr)        # Facilitates data tidying, especially reshaping with pivot_longer and pivot_wider.
+
+## Libraries for Data Input and String Operations
+library(readr)        # Fast and friendly way to read rectangular data (like CSV, TSV).
+library(stringr)      # Simplifies string operations, consistent, simple and fast string handling.
+
+## Libraries for Data Visualization
+library(ggplot2)      # A system for declaratively creating graphics, based on the Grammar of Graphics.
+library(pheatmap)     # Simplifies creating heat maps and adjusting their fine details.
+library(RColorBrewer) # Provides color schemes for maps and other graphics.
+library(ggrepel)    # Helps with non-overlapping text labels on plots.
+library(dendextend) # For enhancing dendrogram objects
+
+
+# Load libraries for statistical analysis
+library(edgeR)        # Analysis of differential expression of RNA-seq count data
+library(stats)        # Contains functions for statistical calculations including clustering and correlation.
+
+## Graphics Device Utilities
+library(grDevices)    # Provides functions for handling colors and other graphic devices, crucial for creating and adjusting plots.
+```
+
+The input data directories are systematically organized to ensure easy access and management of data files necessary for the analysis:
+
+- 0_EXPERIMENT_INFO: Contains metadata about the experiments, such as sample details, experimental conditions...
+- 1_COUNTS: Stores count matrices.
+- 2_PEAK_INFO: Includes information about genomic regions of open chromatin identified in the ATAC-seq data.
+- 3_OTHER_SP_DATA: Holds comparative ATACseq data from other species that will be used for cross-species analysis. This data comes from publicly available data.
+- 4_NATCOM2020_INFO: Specific mayfly genomic information coming from [Almudi _et al.,_ 2020](https://doi.org/10.1038/s41467-020-16284-8).
+- 5_RNA-SEQ: Directory for storing RNA-seq data files.
+
+We save the paths to this folders in variables to acces them during all the analysis
+
+```{r folder with input data}
+info  <- paste0(wd,"0_EXPERIMENT_INFO/")
+counts  <- paste0(wd,"1_COUNTS/")
+peak_info <- paste0(wd,"2_PEAK_INFO/")
+sp_data <- paste0(wd,"3_OTHER_SP_DATA/")
+natcom2020 <- paste0(wd,"4_NATCOM2020_INFO/")
+rnaseq <- paste0(wd,"5_RNA-SEQ/")
+```
+
+The output data structure is geared towards organizing the results of the analysis into logical and functional directories, making it easier to locate and use the data in subsequent steps or for final reporting.
+
+- A6_RNASEQ_INTEGRATION: This is the main folder designated for storing all outputs related to differential peak analysis. It acts as a central hub for aggregating analytical results. This will be designed as our analysis folder.
+- output_images: A subfolder created within the main analysis folder to store all graphical representations produced during the analysis. 
+- output_files: This directory is reserved for statistical outputs, such as tables.
+
+```{r folders to save results}
+analysis_folder <- paste0(wd,"A6_RNASEQ_INTEGRATION/")
+imgdir  <- paste0(analysis_folder,"/output_images/")
+statdir <- paste0(analysis_folder,"/output_files/")
+```
+
+```{r opts_chunk setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	fig.path = imgdir,
+	fig.width = 10,
+	fig.height = 7
+)
+setwd(file.path(wd))
+```
+
+# Importing and Organizing Data
+
+## C. dipterum ATAC Data
+
+To initiate our analysis of ATAC-seq data for *C. dipterum*, we begin by importing the sample information. This dataset includes essential details for each sample, crucial for the subsequent analyses.
+
+```{r warning=FALSE}
+# Load the sample information from a CSV file
+samples_info <- readr::read_delim(paste0(info, "info_samples.csv"),
+                                  delim = ",", 
+                                  escape_double = FALSE, 
+                                  trim_ws = TRUE)
+# Display the dataframe to verify its contents
+samples_info
+```
+
+Given our focus on dynamic peaks identified in a previous analysis (see Downstream analysis 1: Quantitative Mapping of Open Chromatin Regions), we next load the normalized count data associated with these peaks:
+
+```{r}
+# Load normalized count data for dynamic samples
+dynamic_sample <- readr::read_delim(paste0(counts, "dynamic_peaks_sample_norm.tsv"),
+                                    delim = "\t", escape_double = FALSE,
+                                    trim_ws = TRUE)
+# Display the dataframe to verify its contents
+head(dynamic_sample)
+```
+
+```{r}
+# Load normalized count data for dynamic stages
+dynamic_stage <- readr::read_delim(paste0(counts, "dynamic_peaks_stage.tsv"),
+                                   delim = "\t", escape_double = FALSE,
+                                   trim_ws = TRUE)
+# Display the dataframe to verify its contents
+head(dynamic_stage)
+```
+
+Additionally, we load the gene associations for each peak, which are critical for functional genomic analysis:
+
+```{r}
+# Load gene associations for peaks
+cdip_peak_associated_gene <- readr::read_delim(paste0(peak_info, "/clodip_embryoATAC_peak_to_gene.tsv"), 
+                                               delim = "\t", escape_double = FALSE, 
+                                               trim_ws = TRUE)
+# Display the top rows of the dataframe to verify its contents
+head(cdip_peak_associated_gene)
+```
+
+## RNA-Seq Data
+
+To supplement our ATAC-seq analysis with gene expression data, we import the RNA-seq counts. This data will allow us to compare gene expression levels with chromatin accessibility.
+
+```{r}
+# Load RNA-seq counts data, setting gene IDs as row names
+rnaseq_counts <- readr::read_delim(paste0(rnaseq, "counts_rnaseq.tsv"),
+                            delim = "\t", escape_double = FALSE, 
+                            trim_ws = TRUE)
+rownames(rnaseq_counts) <- rnaseq_counts$gene_id
+# Display the dataframe to verify the row names are set correctly
+head(rnaseq_counts)
+```
+
+
+# Parameters Setup
+This section allows you to define key variables for your experiment and set aesthetic parameters for your graphs, making your analysis both rigorous and visually coherent.
+
+## Cut Off
+
+First, we set the statistical thresholds, crucial for determining significance in our differential analysis:
+```{r}
+# Setting minimum filter threshold
+MIN_FILT = 10
+```
+
+Here, we define thresholds for fold change and p-values. A fold change threshold of 20 ensures that only the most substantially different expressions are considered, while a p-value below 0.05 is commonly accepted for statistical significance.
+
+```{r}
+# Defining Fold Change and p-value thresholds for significance in the analysis
+MIN_FC <- 2 # Fold Change threshold
+MIN_PV <- 0.05 # p-value threshold
+```
+
+In this analysis we are using clustering methods for the dendograms. We save some of the methods that we want to test
+
+```{r}
+method <- c("euclidean", "maximum", "manhattan", "canberra", "binary" , "minkowski")
+```
+
+## Conditions to Study
+
+Defining experimental conditions allows for targeted differential analysis across developmental stages. This block of code categorizes samples into developmental stages, which are crucial for comparing chromatin accessibility changes over time.
+
+```{r}
+# Creating a factor variable for the stages of development, which will be used in differential analysis
+condition_factors <- factor(samples_info$stage,
+                            levels=c("emb4","emb6","emb8","emb10", "emb12", "emb14"))
+
+# Assigning the factor to a new column in samples_info for easy reference
+samples_info$condition <- condition_factors
+```
+
+## Aesthetic Parameters
+
+Important: To ensure your analysis runs smoothly and your graphs look exactly as intended, it's crucial that the names you use in the following lists exactly match those defined in your data files. This consistency is key for linking your data correctly with the aesthetic elements like colors.
+
+Now, let's define some color parameters to keep our graphs looking consistent and visually appealing:
+
+```{r fig.width=3, fig.height=3}
+# Defining color schemes for the conditions, ensuring they match those in samples_info$condition
+condition_colors <- c("emb4"="#0072B2",  
+                      "emb6"="#009E73",  
+                      "emb8"="#D55E00",  
+                      "emb10"="#CC79A7", 
+                      "emb12"="#F0E442", 
+                      "emb14"="#56B4E9")
+
+# Setting colors for individual samples within each condition
+sample_colors <- c("e4_1"="#0072B2", 
+                   "e4_2"="#72C2FF",  
+                   "e6_1"="#009E73", 
+                   "e8_1"="#D55E00",
+                   "e10_1"="#CC79A7",
+                   "e10_2"="#FFB3D9", 
+                   "e12_1"="#F0E442",
+                   "e12_2"="#FFFF99",
+                   "e14_1"="#56B4E9",
+                   "e14_2"="#99D6FF")
+
+# Color coding for different peak zones
+zone_colors <- c("promoter"="#DDC50F", 
+                 "proximal"="#228B22",  
+                 "genebody"="#4169E1",
+                 "distal"="#984EA3")
+
+# Additional color settings for states of the chromatin
+state_colors <- c("open"="#48A9A6",
+                  "closed"="#C97C5D",
+                  "no-sig"="grey")
+
+```
+
+We also specify the order in which samples and stages should be arranged for visual consistency across figures:
+
+```{r}
+# Ordering of samples for plots
+sample_order <- c("e4_1", 
+                  "e4_2", 
+                  "e6_1", 
+                  "e8_1",  
+                  "e10_1", 
+                  "e10_2", 
+                  "e12_1", 
+                  "e12_2", 
+                  "e14_1", 
+                  "e14_2")
+
+# Mapping of stages to descriptive names
+stage_order <- c("emb4"="Stage 4",
+                 "emb6"="Stage 6", 
+                 "emb8"="Stage 8", 
+                 "emb10"="Stage 10", 
+                 "emb12"="Stage 12", 
+                 "emb14"="Stage 14")
+```
+
+# Exploratory analysis
+
+# Counts 
+
+We begin our exploratory analysis by structuring the raw RNA-seq counts data. This step involves converting the dataframe to a matrix format, which facilitates more efficient computations in later steps.
+
+```{r}
+# Convert the RNA-seq count dataframe, excluding the first column (gene IDs), to a matrix
+rnaseq_counts_m <- as.matrix(rnaseq_counts[,-1])
+rownames(rnaseq_counts_m) <- rnaseq_counts$gene_id
+
+#In this analysis we only have one replicate for stage6 and stage8. We filter that:
+samples_info <- samples_info[samples_info$sample %in% colnames(rnaseq_counts_m),]
+```
+
+Next, we apply a filtering criterion to remove genes with low counts, which are less informative and can slow down downstream analyses.
+
+```{r}
+# Filter out rows with total counts not exceeding a minimum threshold
+keep <- rowSums(rnaseq_counts_m) > MIN_FILT
+rnaseq_counts_m <- rnaseq_counts_m[keep,]
+```
+
+This section emphasizes the preparation and initial analysis of sequencing count data to ensure a robust understanding of sample variability, essential for the subsequent normalization processes.
+
+```{r}
+# Create a DGEList object, which is integral for handling count data with associated sample information efficiently
+dge <- DGEList(counts=as.matrix(rnaseq_counts_m),
+               samples=samples_info,
+               group=samples_info$condition)
+```
+
+To better understand the initial distribution of library sizes across samples, we compute and visualize these sizes.
+```{r}
+# Calculate and order library sizes for visualization purposes
+library_sizes_df <- data.frame(sample=colnames(dge$counts),
+                               libsize=colSums(dge$counts))
+library_sizes_df <- names_to_graph(library_sizes_df, "sample", sample_order)
+```
+
+```{r library_size_raw}
+# Plot the library sizes before normalization
+libsize_plot <- ggplot(library_sizes_df, aes(x = sample, y = libsize)) +
+  geom_bar(stat = "identity", fill = sample_colors) +
+  theme_classic() +
+  labs(title = "Library Sizes Before Normalization",
+       x = "Sample",
+       y = "Library size")
+print(libsize_plot)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the initial library size plot to a file
+save_ggplot(libsize_plot, "library_size_raw")
+```
+
+Recognizing discrepancies in library sizes, we apply normalization using the Trimmed Mean of M-values (TMM) method, which adjusts for library size and compositional differences across samples.
+
+```{r}
+# Normalize library sizes using the TMM method to account for library size and compositional biases
+dge <- calcNormFactors(dge, method="TMM")
+```
+
+Finally, we save the normalized data as counts per million (CPM) for both log-transformed and untransformed data, enabling further analysis.
+
+```{r}
+# Calculate and save counts per million for further analysis
+logCPM <- cpm(dge, 
+              normalized.lib.sizes = TRUE,
+              log=TRUE, 
+              prior.count=3)
+rownames(logCPM) <- rownames(rnaseq_counts_m)
+
+CPM <- cpm(dge, log=FALSE)
+
+logCPM_df <- data.frame(logCPM)
+logCPM_df$gene_id <- rownames(rnaseq_counts_m)
+```
+
+## Sample Diversity
+
+This section provides a visual exploration of the diversity among samples using normalized count data derived from dynamic peaks. The objective is to capture variations in gene expression patterns and chromatin accessibility across different samples, which may be influenced by developmental stages or experimental conditions.
+
+### Principal Component Analysis (PCA)
+
+The PCA plot is instrumental in visualizing the overall variability among the samples by reducing the dimensionality of the data. This reduction helps to highlight patterns of similarity and divergence, which can be crucial for understanding biological differences.
+
+```{r pca}
+# Perform PCA on the normalized counts matrix
+pcaData <- prcomp(logCPM, scale=TRUE)
+pcaData.df <- as.data.frame(pcaData$rotation)
+percentVar <- round(summary(pcaData)$importance[2,]*100, 2)
+
+# Label samples in the PCA plot
+pcaData.df$sample <- as.factor(row.names(pcaData.df))
+
+# Generate PCA plot
+pca.expr_raw <- ggplot(pcaData.df, aes(x=PC1, y=PC2, color=sample, label=sample)) +
+  geom_point(size=3) +
+  scale_color_manual(values=sample_colors) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  geom_label_repel(aes(label = sample),
+                   box.padding   = 0.35,
+                   point.padding = 0.5,
+                   segment.color = 'grey50') +
+  theme_light() +
+  theme(legend.position="none")
+print(pca.expr_raw)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the PCA plot
+save_ggplot(pca.expr_raw, "pca")
+```
+
+PC1 and PC2 capture the primary sources of variation, highlighting significant axes of gene expression changes among samples. This visualization facilitates the identification of sample clusters with similar expression profiles, clearly distinguishing between early and late developmental stages.
+
+###Hierarchical Clustering
+
+Hierarchical clustering complements PCA by examining relationships among samples based on correlation-based distance metrics. This method clusters samples to reveal groups based on similarities in chromatin accessibility patterns.
+
+```{r dendogram}
+# Calculate Spearman correlation-based distance matrix
+dist <- as.dist(1 - cor(logCPM, method="spearman"))
+distclust <- hclust(dist)
+
+# Convert hierarchical clustering into a dendrogram and color code by developmental stage
+dendrogram <- as.dendrogram(distclust, hang=0.1)
+labels_colors(dendrogram) <- sample_colors[samples_info$condition][order.dendrogram(dendrogram)]
+
+# Plot the dendrogram
+dend_raw <- function(){
+    plot(dendrogram,
+         horiz = FALSE,
+         yaxt='n', ann=FALSE)
+}
+dend_raw()
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the dendrogram plot
+save_ggplot(dend_raw(), "dendrogram")
+```
+
+This hierarchical clustering analysis helps identify which samples are more akin to each other, potentially indicating common regulatory mechanisms or stages of development. Like the PCA, it serves to discern clear groupings among the samples.
+
+### Aggregation of Normalized Counts by Biological Stages
+
+This section outlines the aggregation of normalized counts by biological stages, facilitating a focused analysis on stage-specific trends and variations. This process is critical for understanding differential gene expression across developmental stages.
+
+```{r}
+# Aggregate normalized counts by sample stage using custom functions for clearer data handling
+logCPM_stage <- logCPM_df %>%
+  pivot_longer(-gene_id, names_to = "sample", values_to = "norm_counts")  %>%
+  mean_collapse_data_by_stage(samples_info=samples_info, df_to_collapse=., numeric_col="norm_counts") %>%
+  dplyr::select(-sd) %>%
+  pivot_wider(names_from = stage, values_from = mean) %>%
+  data.frame()
+
+# Save the mean data of normalized counts for each stage
+write_delim(logCPM_stage,
+            paste0(statdir, "logcpm_stage.tsv"),
+            "\t")
+```
+
+```{r}
+# Assign peak IDs as row names for the matrix of normalized counts by stage
+logCPM_stage_matrix <- as.matrix(logCPM_stage[,-1])
+rownames(logCPM_stage_matrix) <- logCPM_stage$gene_id
+```
+
+# Heat Maps of RNA-seq Counts
+
+Heat maps are a powerful tool for visualizing complex data sets, allowing us to observe patterns of gene expression across different samples or conditions. This section details the creation of heat maps for all genes and specifically for dynamic peaks associated with differential gene expression.
+
+#### Heat Map of All Genes
+
+First, we generate a heat map for all genes using the matrix of log-transformed counts per million (logCPM) that are normalized by stage. This provides an overview of expression across all stages.
+
+```{r heatmap_all}
+# Create a basic heat map for all genes
+heatmap_all <- pheatmap(logCPM_stage_matrix)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the heat map
+save_ggplot(heatmap_all, "heatmap_dynamics_ordered_stage")
+```
+
+## Identification and Visualization of Dynamic Genes
+
+Next, we focus on genes associated with dynamic peaks. These genes are crucial as they may exhibit significant changes in expression corresponding to developmental stages or experimental conditions.
+
+```{r}
+# Filter genes associated with dynamic peaks
+dynamic_genes <- cdip_peak_associated_gene %>%
+  dplyr::filter(peak_id %in% dynamic_stage$peak_id) %>%
+  dplyr::select(clodip_v3) %>%
+  dplyr::filter(!is.na(clodip_v3)) %>%
+  dplyr::pull(clodip_v3)
+
+# Subset the logCPM matrix to include only dynamic genes, ordered by stage
+dynamic_genes_logcpm <- logCPM_stage_matrix[rownames(logCPM_stage_matrix) %in% dynamic_genes,]
+dynamic_genes_logcpm <- dynamic_genes_logcpm[, names(stage_order)]
+```
+
+## Exploratory Heat Maps for Dynamic Peaks
+
+We explore different clustering distances to best capture the inherent groupings within the dynamic genes.
+```{r}
+# Explore clustering methods via heat maps
+lapply(method, function(m){pheatmap::pheatmap(dynamic_genes_logcpm,
+                                    cutree_cols=2, 
+                                    clustering_distance_rows = m,
+                                    main=paste0("All dynamic peaks. Clustering: ", m),
+                                    show_rownames=F)})
+```
+
+After selecting the optimal clustering method:
+
+```{r heatmap_dynamics}
+# Final heat map using the selected clustering method
+heatmap_dynamics <- pheatmap::pheatmap(dynamic_genes_logcpm,
+         cutree_cols=2, 
+         clustering_distance_rows = "euclidean",
+         main="All dynamic peaks",
+         show_rownames=F)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the final heat map
+save_ggplot(heatmap_dynamics, "heatmap_dynamics")
+```
+
+Sometimes, not clustering the columns can help in observing trends more related to the experimental design or conditions.
+
+```{r heatmap_dynamics_ordered_stage}
+# Heat map without clustering columns to observe stage-specific patterns
+heatmap_dynamics_ordered_stage <- pheatmap::pheatmap(dynamic_genes_logcpm,
+         cluster_cols = FALSE,
+         clustering_distance_rows = "euclidean",
+         main="All dynamic peaks ordered by stage",
+         show_rownames=F)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Save the stage-ordered heat map
+save_ggplot(heatmap_dynamics_ordered_stage, "heatmap_dynamics_ordered_stage")
+```
+
+To further dissect the relationships among dynamic genes, we apply clustering and annotate the heat map rows based on identified clusters.
+
+```{r}
+# Initialize a logical vector for row labeling
+label_rows <- rep(FALSE, nrow(dynamic_genes_logcpm))
+
+# Optionally, specify rows to label based on specific criteria (e.g., particular gene IDs)
+# Uncomment the following line and adjust the gene IDs as needed
+# label_rows[rownames(dynamic_genes_logcpm) %in% c("clodip_v3_1246", "clodip_v3_2467")] <- TRUE
+
+# Generate labels for the rows, showing names for selected rows only
+row_labels <- ifelse(label_rows, rownames(dynamic_genes_logcpm), "")
+```
+
+```{r}
+# Determine the number of clusters and annotate rows accordingly
+nclust <- 12
+row_dendrogram <- heatmap_dynamics_ordered_stage$tree_row
+clusters <- stats::cutree(row_dendrogram, k = nclust)
+
+annotation_row <- data.frame(Clusters = factor(clusters))
+rownames(annotation_row) <- names(clusters)
+
+# Define colors for clusters
+ann_colors <- setNames(colorRampPalette(brewer.pal(12, "Set3"))(nclust), 
+                       levels(annotation_row$Clusters))
+```
+
+```{r heatmap_dynamics_clustred}
+# Heat map with row clustering and annotations
+heatmap_dynamics_clustred <- pheatmap::pheatmap(dynamic_genes_logcpm,
+         cutree_rows = nclust, 
+         clustering_distance_rows = "euclidean",
+         labels_row = row_labels,
+         annotation_row = annotation_row,
+         annotation_colors = list(Clusters = ann_colors),
+         main = "All dynamic peaks with annotated clusters")
+```
+
+```{r message=FALSE, warning=FALSE}
+save_ggplot(heatmap_dynamics_clustred, "heatmap_dynamics_clustred")
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
