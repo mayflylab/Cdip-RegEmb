@@ -1,0 +1,376 @@
+---
+title: "Chromatin Changes in Relation to WGCNA Modules"
+subtitle: "Gene regulatory dynamics during embryogenesis in Cloeon dipterum"
+author: "Maria Rossello"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_knit setup, include=FALSE, warning=FALSE}
+# Get your working directory (where you have your data):
+wd <- "/home/mariarossello/atac_paper_analysis/"
+setwd(file.path(wd))
+
+knitr::opts_knit$set(
+  root.dir = normalizePath(wd))
+```
+
+# Setting up project folders and libraries
+
+This section outlines the initial setup. It involves loading specific R functions, setting up necessary libraries, and organizing data directories to streamline file management and data processing.
+
+*Loading necessary functions.* This code chunk is responsible for importing custom R functions necessary for processing and analyzing ATAC-seq data. These functions are stored externally and are essential for the specific analyses that will be conducted in subsequent steps. 
+
+```{r message=FALSE, warning=FALSE}
+# Load functions from a script located in the working directory for downstream analysis
+source(paste0(wd,"/atac_downstrem_analysis_functions.R"))
+```
+
+*Loading required libraries.* A suite of R packages is loaded here, enabling data manipulation, visualization, and advanced statistical analysis
+
+```{r message=FALSE, warning=FALSE}
+# Data Import and Manipulation
+library(readr)   # Functions for reading delimited files
+library(dplyr)   # Data manipulation functions
+library(tidyr)   # Tools for data tidying
+
+# Visualization and Plotting
+library(ggplot2)       # Data visualization package
+```
+
+The input data directories are systematically organized to ensure easy access and management of data files necessary for the analysis:
+
+- 0_EXPERIMENT_INFO: Contains metadata about the experiments, such as sample details, experimental conditions...
+- 1_COUNTS: Stores count matrices.
+- 2_PEAK_INFO: Includes information about genomic regions of open chromatin identified in the ATAC-seq data.
+- 3_OTHER_SP_DATA: Holds comparative ATACseq data from other species that will be used for cross-species analysis. This data comes from publicly available data.
+- 4_NATCOM2020_INFO: Specific mayfly genomic information coming from [Almudi _et al.,_ 2020](https://doi.org/10.1038/s41467-020-16284-8).
+- 5_RNA-SEQ: Directory for storing RNA-seq data files.
+
+We save the paths to this folders in variables to acces them during all the analysis
+
+```{r folder with input data}
+info  <- paste0(wd,"0_EXPERIMENT_INFO/")
+counts  <- paste0(wd,"1_COUNTS/")
+peak_info <- paste0(wd,"2_PEAK_INFO/")
+sp_data <- paste0(wd,"3_OTHER_SP_DATA/")
+natcom2020 <- paste0(wd,"4_NATCOM2020_INFO/")
+rnaseq <- paste0(wd,"5_RNA-SEQ/")
+```
+
+The output data structure is geared towards organizing the results of the analysis into logical and functional directories, making it easier to locate and use the data in subsequent steps or for final reporting.
+
+- analysis_folder: This is the main folder designated for storing all outputs related to differential peak analysis. It acts as a central hub for aggregating analytical results. This will be designed as our analysis folder.
+- output_images: A subfolder created within the main analysis folder to store all graphical representations produced during the analysis. 
+- output_files: This directory is reserved for statistical outputs, such as tables.
+
+```{r folders to save results}
+analysis_folder <- paste0(wd,"A3_CHROMATIN_ASSOCIATION_WGCNA//")
+imgdir  <- paste0(analysis_folder,"/output_images/")
+statdir <- paste0(analysis_folder,"/output_files/")
+```
+
+```{r opts_chunk setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	fig.path = imgdir,
+	fig.width = 10,
+	fig.height = 7
+)
+setwd(file.path(wd))
+```
+
+# Importing and organizing ATAC-seq data
+
+## C. dipterum ATAC data
+
+We'll start by loading the sample information file for the ATAC-seq analysis, which includes details for each sample.
+
+```{r warning=FALSE}
+samples_info <- data.frame(read_delim(paste0(info,"/info_samples.csv"),
+                           delim = ",", 
+                           escape_double = FALSE, 
+                           trim_ws = TRUE))
+samples_info
+```
+
+Since we will be working only with the previously defined dynamic peaks (Check Analysis 1) we load only the counts of the dynamic peaks normalized by library size and collabsed by stage.
+
+```{r}
+dynamic_norm_counts_df <- data.frame(read_delim(paste0(counts,"dynamic_peaks_sample_norm.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+```
+
+We also import peak information associated with genes and unique zones for further analysis.
+
+```{r}
+cdip_peak_zone_associated_gene <- data.frame(read_delim(paste0(peak_info,"/clodip_embryoATAC_peaks_and_genes.tsv"),
+                                                        delim = "\t", escape_double = FALSE,
+                                                        trim_ws = TRUE))
+cdip_peak_zone_associated_gene <- cdip_peak_zone_associated_gene %>% rename(peak = "peak_id")
+rownames(cdip_peak_zone_associated_gene) <- cdip_peak_zone_associated_gene$peak_id
+head(cdip_peak_zone_associated_gene)
+```
+
+```{r}
+cdip_peak_unique_zone<- data.frame(read_delim(paste0(peak_info,"/clodip_embryoATAC_peaks_and_zones.tsv"),
+                                              delim = "\t", escape_double = FALSE,
+                                              trim_ws = TRUE))
+
+ cdip_peak_unique_zone <- cdip_peak_unique_zone %>% rename(peak = "peak_id")
+ rownames(cdip_peak_unique_zone) <- cdip_peak_unique_zone$peak_id
+ head(cdip_peak_unique_zone)
+```
+
+Further, we load the gene associations for each peak, which are critical for functional genomic analysis:
+
+```{r}
+cdip_peak_associated_gene <- read_delim(paste0(peak_info,"/clodip_embryoATAC_peak_to_gene.tsv"), 
+                             delim = "\t", escape_double = FALSE, 
+                             trim_ws = TRUE)
+head(cdip_peak_associated_gene)
+```
+
+## WGCNA data
+
+For C. dipterum in this paper we use a new annotation (v3) but the other publicly available data use other gene models. We load a table to have this equivalences (based in blast). 
+
+```{r}
+cd_to_v3_transcripts <- read_table(paste0(natcom2020,"/Cdip_ah2p_vs_clodip_v3_ids.txt"),
+                       col_names = FALSE)
+colnames(cd_to_v3_transcripts) <- c("Cdip_ah2p", "clodip_v3")
+```
+
+We want the information per gene (since this is how we do this analysis). We save this information for future analysis.
+
+```{r}
+cd_to_v3_genes <- cd_to_v3_transcripts %>%
+  mutate(
+    Cdip_ah2p = str_remove(Cdip_ah2p, "\\..*"),
+    clodip_v3 = str_remove(clodip_v3, "\\..*") 
+  ) %>%
+  distinct(Cdip_ah2p, clodip_v3, .keep_all = TRUE)
+
+write.table(cd_to_v3_genes, 
+            paste0(natcom2020,"/Cdip_ah2p_vs_clodip_v3_ids_gene.txt"), 
+            sep = "\t", row.names = F)
+```
+
+
+We load WGCNA modules from https://doi.org/10.1038/s41467-020-16284-8. 
+
+```{r}
+wgcna_modules <- read_csv(paste0(natcom2020,"/WGCNA_modules.csv"),
+                          col_types = cols_only(Names = col_guess(),
+                                                WGCNA_module = col_guess()))
+colnames(wgcna_modules) <- c("Cdip_ah2p", "module")
+```
+
+# Aesthetic Parameters
+
+Important: To ensure your analysis runs smoothly and your graphs look exactly as intended, it's crucial that the names you use in the following lists exactly match those defined in your data files. This consistency is key for linking your data correctly with the aesthetic elements like colors.
+
+Now, let's define some color parameters to keep our graphs looking consistent and visually appealing:
+
+```{r colors}
+# Defining color schemes for the conditions, ensuring they match those in samples_info$condition
+condition_colors <- c("emb4"="#0072B2",  
+                      "emb6"="#009E73",  
+                      "emb8"="#D55E00",  
+                      "emb10"="#CC79A7", 
+                      "emb12"="#F0E442", 
+                      "emb14"="#56B4E9")
+
+# Color coding for different peak zones
+zone_colors <- c("promoter"="#DDC50F", 
+                 "proximal"="#228B22",  
+                 "genebody"="#4169E1",
+                 "distal"="#984EA3")
+
+```
+
+We also specify the order in which samples and stages should be arranged for visual consistency across figures:
+
+```{r order}
+# Mapping of stages to descriptive names
+stage_order <- c("emb4"="Stage 4",
+                 "emb6"="Stage 6", 
+                 "emb8"="Stage 8", 
+                 "emb10"="Stage 10", 
+                 "emb12"="Stage 12", 
+                 "emb14"="Stage 14")
+```
+
+# Analizing dynamic peack in each WGCNA cluster
+
+In the first step, we merge gene annotations and WGCNA module data, integrating genomic information crucial for identifying chromatin changes across different modules. This process ensures we focus on unique peak-to-gene mappings by removing duplicates, preparing the data for downstream analysis that combines chromatin peak data with associated genes.
+
+```{r}
+peaks_in_wgcna <- inner_join(cd_to_v3_genes, wgcna_modules, by = "Cdip_ah2p") %>%
+  inner_join(cdip_peak_associated_gene, by = "clodip_v3") %>%
+  dplyr::select(peak_id, module, zone, clodip_v3) %>%
+  distinct(peak_id, module, zone, clodip_v3, .keep_all = TRUE)
+```
+
+The assignment of specific names to different WGCNA modules helps categorize them into functional groups reflecting their biological significance. Each color code corresponds to a WGCNA module.
+
+```{r}
+modules <- list(
+  grey60 = "VesicleTransport",
+  greenyellow = "Brain",
+  sienna3 = "Cytoskeleton",
+  lightgreen = "Pre-nymph",
+  yellow = "Wing",
+  steelblue = "MalpighianTube",
+  brown = "Gills",
+  orange = "Cuticle",
+  blue = "Muscle",
+  skyblue = "Chitin",
+  yellowgreen = "Trachea",
+  black = "Gut",
+  paleturquoise = "Gut-Malpighian",
+  cyan = "ProteinSynthesis",
+  tan = "10dpf-Neurogenesis",
+  darkolivegreen = "BrainB-LipidMetabolism",
+  magenta = "MaleHead-Phototransduction",
+  turquoise = "Ovaries",
+  darkmagenta = "FemaleHead-FattyAcidMetabolism",
+  red = "4dpf-Autophagy",
+  saddlebrown = "Embryogenesis-Synapsis",
+  darkgrey = "Transcription",
+  green = "Testis"
+)
+```
+
+## Chromatin Zone Distribution
+
+Focusing the analysis on chromatin regions that are dynamically expressed and associated with specific modules enhances our understanding of gene regulation during embryogenesis. 
+
+```{r}
+dynamic_peaks_in_wgcna <- peaks_in_wgcna %>%
+  filter(module %in% names(modules)) %>%
+  filter(peak_id %in% dynamic_norm_counts_df$peak_id)
+
+dynamic_peaks_in_wgcna <- names_to_graph(dynamic_peaks_in_wgcna, "module", modules)
+```
+
+In this plot, we can see the distribution of chromatin zones—promoter, proximal, and genebody—across all modules. The bar chart provides a clear visual representation of how each zone contributes to the chromatin landscape, emphasizing the overall prevalence and significance of each zone type.
+
+```{r wgcna_type_of_zone, fig.height=4, fig.width=6}
+dynamic_peaks_in_wgcna_type_plot <- ggplot(dynamic_peaks_in_wgcna, 
+                                           aes(x = factor(zone, levels = c("promoter", "proximal", "genebody")),
+                                               fill = factor(zone, levels = c("promoter", "proximal", "genebody")))) +
+  geom_bar() +
+  theme_classic() +
+  scale_fill_manual(values = zone_colors) +
+  theme(legend.position = "none") +
+  labs(title = "Distribution of Zones within Each Module",
+       x = "Zone",
+       y = "Number of Peaks")
+print(dynamic_peaks_in_wgcna_type_plot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+save_ggplot(dynamic_peaks_in_wgcna_type_plot, "wgcna_type_of_zone")
+```
+
+This plot offers a detailed view of the chromatin zone distribution by module. This allows us to compare the chromatin structures between different modules, highlighting unique or shared characteristics among them.
+
+```{r wgcna_type_of_zone_by_module}
+dynamic_peaks_in_wgcna_type_module_plot <- ggplot(dynamic_peaks_in_wgcna, 
+                                           aes(x = factor(zone, levels = c("promoter", "proximal", "genebody")),
+                                               fill = factor(zone, levels = c("promoter", "proximal", "genebody")))) +
+  geom_bar() +
+  facet_wrap(~module) +
+  theme_classic() +
+  scale_fill_manual(values = zone_colors) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x = element_blank(),
+        legend.title = element_blank()) +
+  labs(title = "Distribution of Zones within Each Module",
+       x = "Zone",
+       y = "Number of Peaks")
+print(dynamic_peaks_in_wgcna_type_module_plot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+save_ggplot(dynamic_peaks_in_wgcna_type_module_plot, "wgcna_type_of_zone_by_module")
+```
+
+This operation automatically extracts and saves a list of peak IDs for each module. These lists are crucial for downstream analyses.
+
+```{r message=FALSE, warning=FALSE}
+invisible(
+  lapply(levels(dynamic_peaks_in_wgcna$module), 
+         function(x){
+           module_peaks <- dynamic_peaks_in_wgcna[(dynamic_peaks_in_wgcna$module == x),]$peak_id
+           file_path <- paste0(statdir, "/WGCNA_", x, "_peaks.txt")
+           writeLines(module_peaks, con = file_path)
+           }
+  )
+)
+```
+
+## Motive enchiment using homer
+
+By analyzing the motif enrichment in different chromatin regions classified by WGCNA modules, we can uncover potentially distinct regulatory mechanisms acting in different functional genomic segments.
+
+This portion of the code iterates over text files in a specified directory, each representing a distinct WGCNA module with associated peak IDs. For each module:
+
+- A BED file is created containing only the peaks from the dynamic dataset that are listed in the module-specific text file.
+- A background (bg) BED file is also generated excluding the peaks listed in the module-specific file from the dynamic dataset. This helps in providing a contrast in the motif enrichment analysis.
+
+Disclaimer:
+This analysis must be run on a high-performance computing cluster or server due to its intensive computational demands, particularly due to the large scale of genomic data and the complexity of motif enrichment processes. 
+
+```{bash eval=FALSE}
+#make bedfile from peak_id
+for file in $homer/wgcna/*.txt; do
+    filename=$(basename "$file")  
+    filename_without_extension="${filename%.*}"  
+    module=$(echo "$filename_without_extension" | cut -d'_' -f2) 
+
+    grep -f $homer/wgcna/WGCNA_"$module"_peaks.txt $bed/dynamic_peaks.bed > $bed/wgcna/"$module"_peaks.bed
+    grep -v -f $homer/wgcna/WGCNA_"$module"_peaks.txt $bed/dynamic_peaks.bed > $bed/wgcna/bg_"$module"_peaks.bed
+done
+
+#run homer
+for file in $homer/wgcna/*.txt; do
+    filename=$(basename "$file")  
+    filename_without_extension="${filename%.*}"  
+    module=$(echo "$filename_without_extension" | cut -d'_' -f2) 
+
+    mkdir $homer/wgcna/"$module"
+
+    findMotifsGenome.pl \
+        $bed/wgcna/"$module"_peaks.bed  \
+        /data/mayfly/clodip_v3/genome_CADEPI01_2023.fasta.soft_masked \
+        $homer/wgcna/"$module" \
+        -preparsedDir $homer/clodip_v3_preparsed/ \
+        -bg $bed/wgcna/bg_"$module"_peaks.bed \
+        -size given \
+        -mset insects \
+        -p 50 \
+        2> $homer/wgcna/"$module"/findMotifsGenome.log
+done
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
