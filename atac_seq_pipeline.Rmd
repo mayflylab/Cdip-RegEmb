@@ -1,0 +1,158 @@
+---
+title: "ATAC-seq Pipeline"
+subtitle: "From Raw Files to Consensus Peaks"
+author: "Joan Pallares & Laia Ortega-Flores"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_chunk setup, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	eval = FALSE)
+```
+
+**Disclaimer:**
+This analysis must be run on a high-performance computing cluster or server due to its intensive computational demands. 
+
+## Alignment to the Genome
+
+We used ATAC_pipe.pl, a previous script developed by [Alejandro Gil](https://github.com/alexgilgal/Thesis_methods/tree/main/ATAC-seq%20analysis). The approach followed relies on Bowtie2 (Langmead and Salzberg, 2012) for the alignment. 
+
+```{bash}
+# ATAC_pipe.pl requires a bowtie index, so we move to where the genome 
+# is located ($GENOME_PATH) and generate it:
+cd $GENOME_PATH
+mkdir BOWTIE2_INDEX
+cd BOWTIE2_INDEX
+bowtie2-build ../genome_CADEPI01_2023.fasta cdip_CADEPI01
+
+# Modify accordingly the $bowtie2_path variable on ATAC_pipe.pl:
+# my $bowtie2_path = "";
+
+# Before running ATAC_pipe.pl we need to generate a folder to store the output 
+# and a temporary folder on our working directory ($WD):
+mkdir $WD/BT_ALIGNMENT
+mkdir $WD/BT_ALIGNMENT/TMP
+
+# We also need to specify where the genome length ($GENOME_LEN) information 
+# and the index folder can be found:
+GENOME_LEN=$GENOME_PATH/genome_CADEPI01_2023_scaffold_lengths.tbl
+BTINDEX=$GENOME_PATH/BOWTIE2_INDEX
+
+# Then we can perform the actual alignment:
+# (This is a slow process, it make take hours.)
+for file in $WD/FASTQ_FILES/*R1*.fastq.gz
+do
+    # Get File Name
+    file=$(basename "$file")
+    filename=$(echo "$file" | awk -F "_R" '{print $1}')
+    
+    # Define the two pair-end reads
+    fq1=$WD/FASTQ_FILES/"$filename"_R1.fastq.gz
+    fq2=$WD/FASTQ_FILES/"$filename"_R2.fastq.gz
+    
+    echo "Treating sample ${filename} ..." 
+
+    perl $WD/ATAC_pipe.pl \
+        -f1 "$fq1" -f2 "$fq2" \
+        -o $WD/BT_ALIGNMENT/"$filename" \
+        -s $GENOME_LEN \
+        -i cdip_CADEPI01 \
+        -p 12 \
+        -bp $BTINDEX \
+        -tmp $WD/BT_ALIGNMENT/TMP/ \
+        -ov_th \
+        2> $WD/BT_ALIGNMENT/"$filename"_ATAC_pipe.log 1>&2
+done & disown
+```
+
+
+## Consensus Peak Identification
+
+The next steps are performed by a script called idr_mod_job_customc.sh, also taken from the repository by [Alejandro Gil](https://github.com/alexgilgal/Thesis_methods/tree/main/ATAC-seq%20analysis). This script uses MACS2 to identify peaks and IDR to evaluate replicates.
+
+The identification of consensus peaks in ATAC-seq data relies on MACS2 and IDR. MACS2 is used to identify peaks on high-throughput data and relies on the Model-based Analysis of ChIP-Seq (MACS) approach (Zhang et al., 2008). The idea is that the probability of finding a read in any given genome location can be modeled. Then, a peak would be a region with a significant enrichment of reads. The distribution of reads is considered to follow a Poisson distribution modelling the probability of finding k occurrences in a
+given time or place, provided that the ratio of occurrences per unit is lambda. Herein, MACS2 takes advantage of the Poisson distribution to identify peaks.
+
+The Ireproducibility Discovery Rate (IDR) (Li et al., 2011) is used to evaluate the reliability of the peak replicates. IDR requires to match peaks in all the replicates, this is done by looking at which peaks overlap. Those peaks having a similar score in all experiments will have a low IDR, while those with dissimilar scores will have a higher IDR.
+
+```{bash}
+# We modified two MACS2 parameters with respect to the original script:
+# we set --extsize to 50 and removed --shift. Besides, we need to provide 
+# the Genome Size ($GENOME_SIZE)
+
+mkdir $OUTPUT_FOLDER
+cd $OUTPUT_FOLDER
+
+for file in $WD/BT_ALIGNMENT/*_1_*nucfree.bed
+do
+    # Get File Name
+    file=$(basename "$file")
+    filename=$(echo "$file" |  cut -d "." -f 1 | cut -d "_" -f 1)
+    filename=$(echo "$file" | awk -F "_._nuc" '{print $1}')
+    
+    rep1=$WD/BT_ALIGNMENT/"$filename"_1_nucfree
+    rep2=$WD/BT_ALIGNMENT/"$filename"_2_nucfree
+                
+    bash $WD/idr_mod_job_customc.sh \
+        $filename \
+        $GENOMESIZE \
+        $rep1 \
+        $rep2 \
+        2> $WD/$OUTPUT_FOLDER/peakcalling_"$filename".log 1>&2
+done & disown
+
+# To Obtain Consensus Peaks across Samples:
+cat $WD/$OUTPUT_FOLDER/*/TRACKS/e*ConsPeaks.bed | \
+    sort  -k1,1 -k2,2n | \
+    cut -f1,2,3,4,5,6 | \
+    mergeBed | sortBed | \
+    awk 'BEGIN {OFS="\t"} {print $1,$2,$3,"peak"NR}' > $WD/$OUTPUT_FOLDER/embryos_all_peaks.bed
+
+```
+
+
+## Obtain Counts
+
+We generated count files so we could evaluate afterwards the accessibility of every peak in each of the samples.
+
+```{bash}
+# First make a dedicated folder:
+mkdir $WD/$OUTPUT_FOLDER/$COUNT_FOLDER
+
+ls -1 $WD/BT_ALIGNMENT/e*_nucfree.bed | while read i
+do
+    x=${i##*/} # Removes the pattern and everything before that  
+    z=${x%_nucfree.bed} # Removes the pattern and anything after that
+
+    # Intersect the reads from the current sample with all the peaks
+    echo "Starting intersect ... sample $x"
+    mkdir $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}
+    intersectBed -c -a $WD/$OUTPUT_FOLDER/embryos_all_peaks.bed -b $i \
+        -nonamecheck > $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}/${z}_counts_TEMP.txt
+        
+    # Generate a sample-specific bed file with counts for every peak
+    echo "Done. Starting parsing to bed... sample $x"
+    awk 'BEGIN {OFS="\t"} {print $1,$2,$3,"peak"NR,$5,"+"}'  \
+        $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}/${z}_counts_TEMP.txt \
+            > $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}/${z}.bed
+        
+    # Generate a .counts file
+    echo "Done. Starting parsing to counts... sample $x"
+    cut -f 4,5 $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}/${z}.bed \
+        > $WD/$OUTPUT_FOLDER/$COUNT_FOLDER/${z}/${z}.counts   
+    rm $WD/$peak_folder/$count_folder/${z}/${z}_counts_TEMP.txt
+  
+    echo "Done with sample $x"
+    echo ""
+done
+```
