@@ -30,4 +30,4 @@ This section encompasses various analyses related to chromatin accessibility dur
 For further inquiries, please contact:
 
 - Maria Rossello: [mariarossello@ub.edu](mailto:mariarossello@ub.edu)
-- Isabel Almudi: [ialudi@ub.edu](mailto:ialudi@ub.edu)
+- Isabel Almudi: [ialmudi@ub.edu](mailto:ialmudi@ub.edu)
