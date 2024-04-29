@@ -6,16 +6,9 @@ This script generates a bedGraph file from each column of a tsv file containing
 counts information. Genomic coordinates must be provided from a separate bed
 annotation file.
 
+Usage: peaks_to_bedgraph.py  normalized_peak_file.tsv annotation_peaks.bed
+
 """
-
-# Usage: peaks_to_bedgraph.py  normalized_peak_file.tsv annotation_peaks.bed
-
-# Usage Example: 
-#    $WD/peaks_to_bedgraph.py $WD/dynamic_peaks_x_stage.tsv $WD/dynamic_peaks.bed
-
-# To move it to Margulis:
-# scp MAYFLY/ATAC_SEQ/peaks_to_bedgraph.py jpallares@evodevo.bio.ub.edu:ATAC_SEQ/
-
 
 # Imports #
 
