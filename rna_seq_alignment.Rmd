@@ -1,0 +1,81 @@
+---
+title: "ATAC-seq Pipeline"
+subtitle: "From Raw Files to Consensus Peaks"
+author: "Joan Pallares & Maria Rossello"
+date: "Last run: `r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r opts_chunk setup, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	eval = FALSE)
+```
+
+**Disclaimer:**
+This analysis must be run on a high-performance computing cluster or server due to its intensive computational demands. 
+
+## Alignment to the Genome
+
+We used STAR (Spliced Transcripts Alignment to a Reference, Dobin et al., 2013) to both map the RNA-seq reads to the genome and quantify them.
+
+```{bash}
+
+# 1/ Generate an Index
+
+# We need to define a folder for the index ($INDEX_FOLDER),
+# as well as a path ($GENOME_PATH) to the genome and
+# annotation files.
+
+STAR \
+    --runMode genomeGenerate \
+    --runThreadN 32 \
+    --genomeDir $INDEX_FOLDER \
+    --genomeFastaFiles $GENOME_PATH/genome_CADEPI01_2023.fasta \
+    --sjdbGTFfile $GENOME_PATH/clodip_v3.gtf \
+    --sjdbOverhang 99 \
+    --genomeSAindexNbases 12 \
+    --genomeChrBinNbits 14 \
+    --limitGenomeGenerateRAM 201877951872 \
+    2> $WD/RNA_SEQ/STAR_INDEX/index_build.log 1>&2 & disown
+    
+# 2/ Perform Mapping & Quantify
+
+# Here we need to define where the fastq samples are ($INPUT_FOLDER)
+# as well as where we want to store the outcomes ($OUTPUT_FOLDER)
+
+# Iterate through the samples
+ls -1 $INPUT_FOLDER | grep -v txt | awk -F '_R' '{print $1}' | sort | uniq \
+    | while read filename; do
+        echo "filename is $filename"
+        
+        mkdir $OUTPUT_FOLDER/$filename
+    
+        # Select Paired Samples
+        file1=$(echo "$filename"_R1.fastq.gz)
+        echo "file1 is $file1"
+        file2=$(echo "$filename"_R2.fastq.gz)
+        echo "file2 is $file2"
+    
+        # Run Star
+        STAR \
+            --runMode alignReads \
+            --quantMode GeneCounts \
+            --outFilterMultimapNmax 4 \
+            --genomeDir $INDEX_FOLDER \
+            --runThreadN 32 \
+            --readFilesIn $INPUT_FOLDER/$file1 $INPUT_FOLDER/$file2 \
+            --readFilesCommand zcat \
+            --outFileNamePrefix $OUTPUT_FOLDER/$filename/ALIGNED_$filename"_" \
+            --outSAMtype BAM Unsorted
+
+done &> $OUTPUT_FOLDER/star_alignment.log & disown
+```
